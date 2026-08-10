@@ -1,4 +1,4 @@
-FROM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 AS ui-build
+FROM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS ui-build
 WORKDIR /app
 COPY ui/package*.json ./ui/
 RUN cd ui && npm ci
@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /bin/github-mcp-server ./cmd/github-mcp-server
 
 # Make a stage to run the app
-FROM gcr.io/distroless/base-debian12@sha256:9c05cfd65f41c93a909ea67eb05b920a3b838780ea55df5421d48295d98ff957
+FROM gcr.io/distroless/base-debian12@sha256:348dac1808083ccc3366399d6db835875b4eaf7c9b694783f5a3f353c4b58a28
 
 # Add required MCP server annotation
 LABEL io.modelcontextprotocol.server.name="io.github.github/github-mcp-server"
