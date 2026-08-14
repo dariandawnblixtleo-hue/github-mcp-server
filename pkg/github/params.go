@@ -6,7 +6,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
@@ -32,6 +32,26 @@ func OptionalParamOK[T any, A map[string]any](args A, p string) (value T, ok boo
 	// Present and correct type
 	ok = true
 	return
+}
+
+// OptionalNullableStringParam preserves omitted, null, and non-empty string values.
+func OptionalNullableStringParam(args map[string]any, p string) (*string, bool, error) {
+	value, ok := args[p]
+	if !ok {
+		return nil, false, nil
+	}
+	if value == nil {
+		return nil, true, nil
+	}
+
+	stringValue, ok := value.(string)
+	if !ok {
+		return nil, true, fmt.Errorf("parameter %s is not of type string or null, is %T", p, value)
+	}
+	if stringValue == "" {
+		return nil, true, fmt.Errorf("parameter %s must not be empty", p)
+	}
+	return &stringValue, true, nil
 }
 
 // isAcceptedError checks if the error is an accepted error.

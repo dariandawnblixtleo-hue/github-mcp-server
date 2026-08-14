@@ -56,7 +56,7 @@ runtime behavior (such as output formatting) won't appear here.
   - **MCP App UI**: `ui://github-mcp-server/issue-write`
   - `assignees`: Usernames to assign to this issue (string[], optional)
   - `body`: Issue body content (string, optional)
-  - `duplicate_of`: Issue number that this issue is a duplicate of. Only used when state_reason is 'duplicate'. (number, optional)
+  - `duplicate_of`: Issue number that this issue is a duplicate of. Required when state_reason is 'duplicate'. (number, optional)
   - `issue_fields`: Issue field values to set or clear. Each item requires 'field_name' and exactly one of 'value', 'field_option_name', or 'delete: true'. (object[], optional)
   - `issue_number`: Issue number to update (number, optional)
   - `labels`: Labels to apply to this issue (string[], optional)
@@ -71,7 +71,7 @@ runtime behavior (such as output formatting) won't appear here.
   - `state`: New state (string, optional)
   - `state_reason`: Reason for the state change. Ignored unless state is changed. (string, optional)
   - `title`: Issue title (string, optional)
-  - `type`: Type of this issue. Only use if issue types are enabled for this repository. Use list_issue_types tool to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter. (string, optional)
+  - `type`: Type of this issue. For updates, pass null to remove the current type. Only use if issue types are enabled for this repository. Use list_issue_types to get valid type values for this repository or its owner organization. If the repository doesn't support issue types, omit this parameter. (string | null, optional)
 
 - **ui_get** - Get UI data
   - **Required OAuth Scopes (any of)**: `repo`, `read:org`
@@ -150,7 +150,7 @@ runtime behavior (such as output formatting) won't appear here.
 
 - **update_issue_assignees** - Update Issue Assignees
   - **Required OAuth Scopes**: `repo`
-  - `assignees`: GitHub usernames to assign to this issue (string[], required)
+  - `assignees`: GitHub usernames to assign to this issue. ([], required)
   - `issue_number`: The issue number to update (number, required)
   - `owner`: Repository owner (username or organization) (string, required)
   - `repo`: Repository name (string, required)
@@ -178,8 +178,12 @@ runtime behavior (such as output formatting) won't appear here.
 
 - **update_issue_state** - Update Issue State
   - **Required OAuth Scopes**: `repo`
+  - `confidence`: How confident you are in this choice. Use 'HIGH' for clear signal or explicit user request, 'MEDIUM' for reasonable inference with some ambiguity, 'LOW' for best guess with limited signal. (string, optional)
+  - `duplicate_of`: The issue number of the canonical issue this issue duplicates. Only valid when state_reason is 'duplicate'. Required when is_suggestion is true and state_reason is 'duplicate'. The issue number is resolved to a database ID before being sent to the API. (number, optional)
+  - `is_suggestion`: If true, this state change is sent to the API as a suggestion (suggest:true) rather than an applied change. Whether the change is applied or recorded as a proposal is determined by the API. (boolean, optional)
   - `issue_number`: The issue number to update (number, required)
   - `owner`: Repository owner (username or organization) (string, required)
+  - `rationale`: One concise sentence explaining what specifically about the issue led you to choose this state. State the concrete signal (e.g. 'The reported crash is fixed in v2.1' → completed). (string, optional)
   - `repo`: Repository name (string, required)
   - `state`: The new state for the issue (string, required)
   - `state_reason`: The reason for the state change (only for closed state) (string, optional)
@@ -196,7 +200,7 @@ runtime behavior (such as output formatting) won't appear here.
   - `confidence`: How confident you are in this choice. Use 'HIGH' for clear signal or explicit user request, 'MEDIUM' for reasonable inference with some ambiguity, 'LOW' for best guess with limited signal. (string, optional)
   - `is_suggestion`: If true, this issue type change is sent to the API as a suggestion (suggest:true) rather than an applied value. Whether the type is applied or recorded as a proposal is determined by the API. (boolean, optional)
   - `issue_number`: The issue number to update (number, required)
-  - `issue_type`: The issue type to set (string, required)
+  - `issue_type`: The issue type to set, or null to remove the current type (string | null, required)
   - `owner`: Repository owner (username or organization) (string, required)
   - `rationale`: One concise sentence explaining what specifically about the issue led you to choose this type. State the concrete signal (e.g. 'Reports a crash when saving' → bug, 'Asks for dark mode support' → feature). (string, optional)
   - `repo`: Repository name (string, required)
@@ -306,7 +310,6 @@ runtime behavior (such as output formatting) won't appear here.
 
 - **issue_dependency_read** - Read issue dependencies
   - **Required OAuth Scopes**: `repo`
-  - `after`: Cursor for pagination. Use the cursor from the previous response. (string, optional)
   - `issue_number`: The number of the issue (number, required)
   - `method`: The read operation to perform on a single issue's dependencies.
     Options are:
@@ -314,6 +317,7 @@ runtime behavior (such as output formatting) won't appear here.
     2. get_blocking - List the issues that this issue blocks.
      (string, required)
   - `owner`: The owner of the repository (string, required)
+  - `page`: Page number for pagination (min 1) (number, optional)
   - `perPage`: Results per page for pagination (min 1, max 100) (number, optional)
   - `repo`: The name of the repository (string, required)
 
@@ -333,5 +337,16 @@ runtime behavior (such as output formatting) won't appear here.
     Options are:
     - 'blocked_by' - the subject issue is blocked by the related issue.
     - 'blocking' - the subject issue blocks the related issue. (string, required)
+
+### `duplicate_detection`
+
+- **find_duplicate** - Find duplicate issues
+  - **Required OAuth Scopes**: `repo`
+  - `confidence_threshold`: Minimum similarity threshold a candidate must meet to be returned; higher values are stricter. When omitted, the API's high-precision default is used. The scale is defined by the API, so no client-side bounds are enforced. (number, optional)
+  - `issue_number`: The number of the existing issue to find duplicates for (number, required)
+  - `owner`: The owner of the repository (string, required)
+  - `page`: Page number for pagination (min 1) (number, optional)
+  - `perPage`: Results per page for pagination (min 1, max 100) (number, optional)
+  - `repo`: The name of the repository (string, required)
 
 <!-- END AUTOMATED FEATURE FLAG TOOLS -->

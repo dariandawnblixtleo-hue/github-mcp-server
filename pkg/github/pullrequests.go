@@ -8,7 +8,7 @@ import (
 	"net/http"
 
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/google/go-github/v87/github"
+	"github.com/google/go-github/v89/github"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/shurcooL/githubv4"
@@ -123,13 +123,13 @@ Possible options:
 				result, err := GetPullRequest(ctx, client, deps, owner, repo, pullNumber)
 				return attachIFC(result), nil, err
 			case "get_diff":
-				result, err := GetPullRequestDiff(ctx, client, owner, repo, pullNumber)
+				result, err := GetPullRequestDiff(ctx, client, deps, owner, repo, pullNumber)
 				return attachIFC(result), nil, err
 			case "get_status":
 				result, err := GetPullRequestStatus(ctx, client, owner, repo, pullNumber)
 				return attachIFC(result), nil, err
 			case "get_files":
-				result, err := GetPullRequestFiles(ctx, client, owner, repo, pullNumber, pagination)
+				result, err := GetPullRequestFiles(ctx, client, deps, owner, repo, pullNumber, pagination)
 				return attachIFC(result), nil, err
 			case "get_commits":
 				result, err := GetPullRequestCommits(ctx, client, owner, repo, pullNumber, pagination)
@@ -196,19 +196,8 @@ func GetPullRequest(ctx context.Context, client *github.Client, deps ToolDepende
 	}
 
 	if ff.LockdownMode {
-		if cache == nil {
-			return nil, fmt.Errorf("lockdown cache is not configured")
-		}
-		login := pr.GetUser().GetLogin()
-		if login != "" {
-			isSafeContent, err := cache.IsSafeContent(ctx, login, owner, repo)
-			if err != nil {
-				return nil, fmt.Errorf("failed to check content removal: %w", err)
-			}
-
-			if !isSafeContent {
-				return utils.NewToolResultError("access to pull request is restricted by lockdown mode"), nil
-			}
+		if restricted, err := authorLockdownResult(ctx, cache, owner, repo, pr.GetUser().GetLogin(), lockdownPullRequestRestrictedMessage); restricted != nil || err != nil {
+			return restricted, err
 		}
 	}
 
@@ -217,7 +206,40 @@ func GetPullRequest(ctx context.Context, client *github.Client, deps ToolDepende
 	return MarshalledTextResult(minimalPR), nil
 }
 
-func GetPullRequestDiff(ctx context.Context, client *github.Client, owner, repo string, pullNumber int) (*mcp.CallToolResult, error) {
+// enforcePullRequestLockdown returns a restricted tool result when lockdown mode is
+// enabled and the pull request author is not a safe content source for owner/repo,
+// and (nil, nil) otherwise. It fetches the pull request to resolve the author and is
+// a no-op that performs no request when lockdown mode is disabled.
+func enforcePullRequestLockdown(ctx context.Context, client *github.Client, deps ToolDependencies, owner, repo string, pullNumber int) (*mcp.CallToolResult, error) {
+	if !deps.GetFlags(ctx).LockdownMode {
+		return nil, nil
+	}
+	cache, err := deps.GetRepoAccessCache(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get repo access cache: %w", err)
+	}
+	pr, resp, err := client.PullRequests.Get(ctx, owner, repo, pullNumber)
+	if err != nil {
+		return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to get pull request", resp, err), nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+		return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to get pull request", resp, body), nil
+	}
+
+	return authorLockdownResult(ctx, cache, owner, repo, pr.GetUser().GetLogin(), lockdownPullRequestRestrictedMessage)
+}
+
+func GetPullRequestDiff(ctx context.Context, client *github.Client, deps ToolDependencies, owner, repo string, pullNumber int) (*mcp.CallToolResult, error) {
+	if restricted, err := enforcePullRequestLockdown(ctx, client, deps, owner, repo, pullNumber); restricted != nil || err != nil {
+		return restricted, err
+	}
+
 	raw, resp, err := client.PullRequests.GetRaw(
 		ctx,
 		owner,
@@ -285,7 +307,7 @@ func GetPullRequestStatus(ctx context.Context, client *github.Client, owner, rep
 		return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to get combined status", resp, body), nil
 	}
 
-	r, err := json.Marshal(status)
+	r, err := json.Marshal(convertToMinimalCombinedStatus(status))
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal response: %w", err)
 	}
@@ -358,7 +380,11 @@ func GetPullRequestCheckRuns(ctx context.Context, client *github.Client, owner, 
 	return utils.NewToolResultText(string(r)), nil
 }
 
-func GetPullRequestFiles(ctx context.Context, client *github.Client, owner, repo string, pullNumber int, pagination PaginationParams) (*mcp.CallToolResult, error) {
+func GetPullRequestFiles(ctx context.Context, client *github.Client, deps ToolDependencies, owner, repo string, pullNumber int, pagination PaginationParams) (*mcp.CallToolResult, error) {
+	if restricted, err := enforcePullRequestLockdown(ctx, client, deps, owner, repo, pullNumber); restricted != nil || err != nil {
+		return restricted, err
+	}
+
 	opts := &github.ListOptions{
 		PerPage: pagination.PerPage,
 		Page:    pagination.Page,
@@ -563,17 +589,18 @@ func GetPullRequestReviews(ctx context.Context, client *github.Client, deps Tool
 		filteredReviews := make([]*github.PullRequestReview, 0, len(reviews))
 		for _, review := range reviews {
 			login := review.GetUser().GetLogin()
-			if login != "" {
-				isSafeContent, err := cache.IsSafeContent(ctx, login, owner, repo)
-				if err != nil {
-					return nil, fmt.Errorf("failed to check lockdown mode: %w", err)
-				}
-				if isSafeContent {
-					filteredReviews = append(filteredReviews, review)
-				}
-				reviews = filteredReviews
+			if login == "" {
+				continue
+			}
+			isSafeContent, err := cache.IsSafeContent(ctx, login, owner, repo)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check lockdown mode: %w", err)
+			}
+			if isSafeContent {
+				filteredReviews = append(filteredReviews, review)
 			}
 		}
+		reviews = filteredReviews
 	}
 
 	minimalReviews := make([]MinimalPullRequestReview, 0, len(reviews))
@@ -750,10 +777,10 @@ func CreatePullRequest(t translations.TranslationHelperFunc) inventory.ServerToo
 				return utils.NewToolResultError(err.Error()), nil, nil
 			}
 
-			newPR := &github.NewPullRequest{
+			newPR := &github.CreatePullRequest{
 				Title: github.Ptr(title),
-				Head:  github.Ptr(head),
-				Base:  github.Ptr(base),
+				Head:  head,
+				Base:  base,
 			}
 
 			if body != "" {
@@ -767,7 +794,7 @@ func CreatePullRequest(t translations.TranslationHelperFunc) inventory.ServerToo
 			if err != nil {
 				return utils.NewToolResultErrorFromErr("failed to get GitHub client", err), nil, nil
 			}
-			pr, resp, err := client.PullRequests.Create(ctx, owner, repo, newPR)
+			pr, resp, err := client.PullRequests.Create(ctx, owner, repo, *newPR)
 			if err != nil {
 				return ghErrors.NewGitHubAPIErrorResponse(ctx,
 					"failed to create pull request",
@@ -1254,10 +1281,9 @@ func AddReplyToPullRequestComment(t translations.TranslationHelperFunc) inventor
 				}
 			}
 
-			var comment *github.PullRequestComment
+			var commentResponse *MinimalResponse
 			if hasBody {
-				var resp *github.Response
-				comment, resp, err = client.PullRequests.CreateCommentInReplyTo(ctx, owner, repo, pullNumber, body, commentID)
+				comment, resp, err := client.PullRequests.CreateCommentInReplyTo(ctx, owner, repo, pullNumber, body, commentID)
 				if err != nil {
 					return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to add reply to pull request comment", resp, err), nil, nil
 				}
@@ -1270,19 +1296,24 @@ func AddReplyToPullRequestComment(t translations.TranslationHelperFunc) inventor
 					}
 					return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to add reply to pull request comment", resp, bodyBytes), nil, nil
 				}
+
+				commentResponse = &MinimalResponse{
+					ID:  fmt.Sprintf("%d", comment.GetID()),
+					URL: comment.GetHTMLURL(),
+				}
 			}
 
 			var result any
 			switch {
 			case hasBody && hasReaction:
-				result = map[string]any{
-					"comment":  comment,
-					"reaction": reactionResponse,
+				result = map[string]MinimalResponse{
+					"comment":  *commentResponse,
+					"reaction": *reactionResponse,
 				}
 			case hasReaction:
 				result = reactionResponse
 			default:
-				result = comment
+				result = commentResponse
 			}
 
 			r, err := json.Marshal(result)
@@ -1294,7 +1325,7 @@ func AddReplyToPullRequestComment(t translations.TranslationHelperFunc) inventor
 		})
 }
 
-// ListPullRequests creates a tool to list and filter repository pull requests.
+// ListPullRequests creates a tool to list pull requests in a GitHub repository.
 func ListPullRequests(t translations.TranslationHelperFunc) inventory.ServerTool {
 	schema := &jsonschema.Schema{
 		Type: "object",
@@ -1333,6 +1364,10 @@ func ListPullRequests(t translations.TranslationHelperFunc) inventory.ServerTool
 		},
 		Required: []string{"owner", "repo"},
 	}
+	schema.Properties["fields"] = fieldsSchemaProperty(
+		"Subset of fields to return for each pull request. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body' in particular drops the largest per-result data.",
+		listPullRequestsItemFieldEnum,
+	)
 	WithPagination(schema)
 
 	return NewTool(
@@ -1373,6 +1408,10 @@ func ListPullRequests(t translations.TranslationHelperFunc) inventory.ServerTool
 				return utils.NewToolResultError(err.Error()), nil, nil
 			}
 			direction, err := OptionalParam[string](args, "direction")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			fields, err := OptionalStringArrayParam(args, "fields")
 			if err != nil {
 				return utils.NewToolResultError(err.Error()), nil, nil
 			}
@@ -1435,10 +1474,23 @@ func ListPullRequests(t translations.TranslationHelperFunc) inventory.ServerTool
 				}
 			}
 
-			r, err := json.Marshal(minimalPRs)
+			filtered := false
+			var payload any = minimalPRs
+			if len(fields) > 0 {
+				filteredPRs, err := filterEachField(minimalPRs, fields)
+				if err != nil {
+					return utils.NewToolResultErrorFromErr("failed to filter pull requests", err), nil, nil
+				}
+				payload = filteredPRs
+				filtered = true
+			}
+
+			r, err := json.Marshal(payload)
 			if err != nil {
 				return utils.NewToolResultErrorFromErr("failed to marshal response", err), nil, nil
 			}
+
+			recordFieldsUsageFor(ctx, deps, "list_pull_requests", minimalPRs, filtered, len(r))
 
 			result := utils.NewToolResultText(string(r))
 			// Pull request titles/bodies are user-authored (untrusted);
@@ -1599,6 +1651,10 @@ func SearchPullRequests(t translations.TranslationHelperFunc) inventory.ServerTo
 		},
 		Required: []string{"query"},
 	}
+	schema.Properties["fields"] = fieldsSchemaProperty(
+		"Subset of fields to return for each pull request result. If omitted, all fields are returned. Use this to reduce response size when you only need specific fields; omitting 'body', 'reactions', and 'labels' in particular drops the largest per-result data.",
+		searchPullRequestsItemFieldEnum,
+	)
 	WithPagination(schema)
 
 	return NewTool(
@@ -1614,7 +1670,13 @@ func SearchPullRequests(t translations.TranslationHelperFunc) inventory.ServerTo
 		},
 		[]scopes.Scope{scopes.Repo},
 		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
-			result, err := searchHandler(ctx, deps.GetClient, args, "pr", "failed to search pull requests", ifcSearchPostProcessOption(ctx, deps))
+			options := []searchOption{ifcSearchPostProcessOption(ctx, deps)}
+			fields, err := OptionalStringArrayParam(args, "fields")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			options = append(options, withFieldsFiltering(deps, "search_pull_requests", fields))
+			result, err := searchHandler(ctx, deps.GetClient, args, "pr", "failed to search pull requests", options...)
 			return result, nil, err
 		})
 }
